@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin-top: 60px;
+            background-color: #f4f6f8;
+        }
+
+        h1 {
+            color: #2c3e50;
+        }
+        h2 {
+            color: #2c3e50;
+        }
+
+        form {
+            margin: 20px auto;
+            padding: 30px;
+            border-radius: 10px;
+            background: white;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            display: inline-block;
+        }
+
+        input[type="file"] {
+            padding: 10px;
+        }
+
+        button {
+            background-color: #3498db;
+            color: white;
+            padding: 10px 20px;
+            margin-top: 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        .result {
+            margin-top: 20px;
+            font-size: 1.2em;
+        }
+
+        /* Popup styling */
+        #popup {
+            display: none; 
+            position: fixed; 
+            top: 50%; 
+            left: 50%; 
+            transform: translate(-50%, -50%);
+            background: white; 
+            border: 1px solid #ccc; 
+            border-radius: 8px; 
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3); 
+            padding: 20px; 
+            width: 850px; 
+            max-width: 95%; 
+            z-index: 9999;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>AFib Detection from ECG Signal (JSON)</h1>
+    <h2 id="test-status" style="font-size: 1.1em; color: #7f8c8d;">Machine Learning Course</h2>
+    <p>By Heng Lymeng</p>
+
+    <form id="json-form">
+        <input type="file" id="jsonFile" accept=".json" required />
+        <button type="submit">Upload</button>
+    </form>
+
+    <div class="result" id="result"></div>
+
+    <!-- Popup container -->
+    <div id="popup">
+        <div id="view-container">
+            <canvas id="ecg-canvas" width="800" height="300" style="border:1px solid #ddd; margin-bottom: 15px; display:none;"></canvas>
+            <div id="prediction-result" style="display:none; width:800px; height:300px; border:1px solid #ddd; margin-bottom: 15px;"></div>
+        </div>
+
+        <div style="margin-top: 10px;">
+            <button id="btn-visualize">Visualize Signal</button>
+            <button id="btn-predict">Prediction</button>
+            <button id="btn-reset" style="background:#e74c3c; color:#fff; margin-left: 15px;">Reset</button>
+        </div>
+    </div>
+
+    <script>
+        let ecgSignal = [];
+
+        // Handle JSON file upload and prediction request
+        document.getElementById("json-form").addEventListener("submit", function (e) {
+            e.preventDefault();
+
+            const fileInput = document.getElementById('jsonFile');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                alert("Please select a JSON file.");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function (e) {
+                try {
+                    const ecgData = JSON.parse(e.target.result);
+                    if (!ecgData.signal || !Array.isArray(ecgData.signal)) {
+                        throw new Error("JSON does not contain valid 'signal' array.");
+                    }
+
+                    ecgSignal = ecgData.signal; // save globally
+
+                    fetch('/predict', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(ecgData)
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.error) {
+                            document.getElementById('result').innerHTML = `<p style="color: red;">Error: ${data.error}</p>`;
+                            document.getElementById('btn-visualize').style.display = 'none';
+                        } else {
+                            const color = data.prediction === "Normal Rhythm" ? '#2ecc71' : '#e74c3c';
+                            const espMsg = data.esp32_status === "DETECT"
+                                ? `<p style="color: red;">ESP32 Command Sent: DETECT</p>`
+                                : `<p style="color: green;">ESP32 Command Sent: UNDETECTED</p>`;
+
+                            document.getElementById('result').innerHTML = `
+                                <h2>Prediction:</h2>
+                                <button style="background-color: ${color}; color: white; padding: 10px 20px; border: none; border-radius: 5px;">
+                                    ${data.prediction}
+                                </button>
+                                ${espMsg}
+                                <p>Prediction Score: ${data.score}</p>
+                            `;
+
+                            document.getElementById('btn-visualize').style.display = 'inline-block';
+
+                            // Show popup with default view (visualize)
+                            showPopup();
+                        }
+                        fileInput.value = "";
+                    })
+                    .catch(err => {
+                        document.getElementById('result').innerHTML = `<p style="color: red;">Failed to connect to server.</p>`;
+                        document.getElementById('btn-visualize').style.display = 'none';
+                        fileInput.value = "";
+                    });
+
+                } catch (error) {
+                    document.getElementById('result').innerHTML = `<p style="color: red;">Invalid JSON format: ${error.message}</p>`;
+                    fileInput.value = "";
+                }
+            };
+
+            reader.readAsText(file);
+        });
+
+        // Popup controls and ECG visualization
+        const popup = document.getElementById('popup');
+        const canvas = document.getElementById('ecg-canvas');
+        const ctx = canvas.getContext('2d');
+        const predictionResultDiv = document.getElementById('prediction-result');
+
+        const btnVisualize = document.getElementById('btn-visualize');
+        const btnPredict = document.getElementById('btn-predict');
+        const btnReset = document.getElementById('btn-reset');
+
+        let animationFrameId;
+        let animationIndex = 0;
+        const pointsPerFrame = 5;
+
+        function clearCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // Animate ECG signal on canvas
+        function animateECG() {
+            clearCanvas();
+
+            const width = canvas.width;
+            const height = canvas.height;
+
+            ctx.beginPath();
+
+            for (let i = 0; i < width; i++) {
+                const signalIndex = animationIndex + i;
+                if (signalIndex >= ecgSignal.length) break;
+
+                const val = ecgSignal[signalIndex];
+
+                // Normalize dynamically between min and max of ecgSignal
+                const minVal = Math.min(...ecgSignal);
+                const maxVal = Math.max(...ecgSignal);
+                const normVal = (val - minVal) / (maxVal - minVal);
+
+                const y = height - normVal * height;
+
+                if (i === 0) ctx.moveTo(i, y);
+                else ctx.lineTo(i, y);
+            }
+
+            ctx.strokeStyle = "#3498db";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            animationIndex += pointsPerFrame;
+
+            if (animationIndex + width < ecgSignal.length) {
+                animationFrameId = requestAnimationFrame(animateECG);
+            }
+        }
+
+        // Show popup and default to visualize view
+        function showPopup() {
+            popup.style.display = 'block';
+            showPrediction();
+        }
+
+        // Hide popup and reset everything
+        function hidePopup() {
+            popup.style.display = 'none';
+            cancelAnimationFrame(animationFrameId);
+            clearCanvas();
+            predictionResultDiv.innerHTML = '';
+            predictionResultDiv.style.display = 'none';
+            canvas.style.display = 'none';
+            animationIndex = 0;
+            ecgSignal = [];
+
+            // Also clear main results and file input
+            document.getElementById('result').innerHTML = '';
+            document.getElementById('jsonFile').value = '';
+            document.getElementById('btn-visualize').style.display = 'none';
+        }
+
+        // Visualize ECG signal animation
+        function showVisualize() {
+            cancelAnimationFrame(animationFrameId);
+            predictionResultDiv.style.display = 'none';
+            canvas.style.display = 'block';
+            predictionResultDiv.innerHTML = '';
+            animationIndex = 0;
+            animateECG();
+        }
+
+        // Show prediction results inside popup
+        function showPrediction() {
+            cancelAnimationFrame(animationFrameId);
+            clearCanvas();
+            canvas.style.display = 'none';
+
+            // Show prediction content copied from main result div
+            predictionResultDiv.style.display = 'block';
+            predictionResultDiv.innerHTML = document.getElementById('result').innerHTML;
+        }
+
+        // Reset everything
+        function resetAll() {
+            hidePopup();
+        }
+
+        // Attach button event listeners
+        btnVisualize.addEventListener('click', showVisualize);
+        btnPredict.addEventListener('click', showPrediction);
+        btnReset.addEventListener('click', resetAll);
+
+        // Optional: close popup when clicking outside of it
+        window.addEventListener('click', function(event) {
+            if (event.target === popup) {
+                resetAll();
+            }
+        });
+
+        // Optional: close popup on ESC key press
+        window.addEventListener('keydown', function(event) {
+            if (event.key === "Escape" && popup.style.display === 'block') {
+                resetAll();
+            }
+        });
+
+        // Initially hide visualize button until prediction is done
+        document.getElementById('btn-visualize').style.display = 'none';
+    </script>
+</body>
+</html>
